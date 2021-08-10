@@ -1,0 +1,422 @@
+---
+title: "Dashboards for Clicker Data"
+output:
+  word_document: default
+---
+
+# Load libraries and data
+```{r warning=FALSE, message=FALSE, echo=FALSE}
+library(tidyverse)
+# install.packages("shiny")
+library(shiny)
+# install.packages("shinydashboard")
+library(shinydashboard)
+library(reshape2)
+
+# experience (123x11) and quiz (2423x13)
+load("data.rda")
+```
+
+# Wire-frame Implementation
+
+```{r}
+### INSTRUCTOR DASHBOARD ##
+#general tab
+general_dash = tabItem(tabName = "general", 
+                       h1("Welcome, Professor XXX!"),
+                       fluidRow(
+                         infoBoxOutput("latest_quiz.info", width = 12)), 
+                       fluidRow(
+                             infoBoxOutput("latest_attendance.info", width = 12)),
+                       fluidRow(width = 12,
+                             infoBoxOutput("latest_feeling.info", width = 12)),
+                      fluidRow(
+                         box(title = "Class Attendance over Time", 
+                             plotOutput("attendance.session.plot", height = 200)
+                               ),
+                         box(title = "Class Feeling over Time",
+                             plotOutput("feeling.session.plot", height = 200)
+                                   ),
+                        box(title = "Distribution of Average Class Quiz Score",
+                             plotOutput("quiz.session.hist", height = 250)
+                               ))
+)
+
+
+# student tab
+student_dash = tabItem(
+    tabName = "student",
+    h1("Student Information"),
+    fluidRow(
+        box(width = 12, title = "Status of Student", height = 400,
+            selectInput("student", "Student ID:", choices = sort(unique(quiz$STUDENT_KEY[quiz$YEAR == 2017]))),
+            fluidRow(align= "center",
+              plotOutput("student.info.plot", height = 250, width = 500))
+            )),
+    fluidRow(
+          box(width = 12, title = "Bottom 10 Students with Quiz Score",
+              fluidRow(align= "center",
+                tableOutput("bottom.10.table"), height = 500)
+          ))
+)
+
+#course recommendations tab
+course_dash = tabItem(tabName = "course",
+                      h1("Course Recommendations"),
+                      fluidRow(align = "center",
+                        box(title = "Average Quiz Score", height = 500, width = 12,
+                            plotOutput("quiz.quiznumber.plot", height = 400, width = 500))),
+                        fluidRow(
+                        box(title = "Revision Recommendation", p("Quiz 7's topics should be revised again due to poor student performance in the quiz."), height = 150, width = 12))
+                    )
+
+### STUDENT DASHBOARD ###
+student_view = tabItem(
+    tabName = "student_view",
+    fluidPage(
+      h1("CS 1001 Business Intelligence"), 
+      h2("Student Dashboard"), 
+  
+      # Dynamic infoBoxes
+      h3("Overview of your Class Performance & Engagement"), 
+      fluidRow(
+        infoBoxOutput("stud.info1", width = 5),
+        infoBoxOutput("stud.info2", width = 5)
+      ),
+      fluidRow(
+        infoBoxOutput("stud.info3", width = 5), 
+        infoBoxOutput("stud.info4", width = 5) 
+      ), 
+      
+      # Any visualization
+      fluidRow(
+              h3("Comparison to Other Students"), 
+              tabBox(id="tabstudent", height=250, 
+                  tabPanel("Quiz Scores", "How am I doing on quizzes relative to other students?",
+                      plotOutput("stud.plot1", height = 250)
+                  ),
+                  tabPanel("Background", "How does my background and preparation compare to other students?",
+                      plotOutput("stud.plot2", height = 250)
+                  ), 
+                  tabPanel("Course Experience", "Do other students have the same attitude in this course as I do?",
+                      plotOutput("stud.plot4", height = 250)
+                  )
+                ), 
+              h3("Progress Over Time"),
+              box(title= "How has my performance on iClicker Quizzes changed over time?",
+                    plotOutput("stud.plot3", height = 250)
+              )
+            )
+      )
+  )
+```
+
+# Data Pre-processing
+
+```{r}
+###### INSTRUCTOR DASHBOARD PRE-PROCESSING ######
+options(dplyr.summarise.inform = FALSE)
+
+teacher_experience = experience %>% filter(YEAR == 2017)
+teacher_quiz = quiz %>% filter(YEAR == 2017)
+
+combined = left_join(teacher_experience, teacher_quiz, by='STUDENT_KEY')
+# remove unnecessary variables. REQUIREMENT_GATHER_SCORE is not useful due to having all 0s
+combined = subset(combined, select=-c(ACAD_DATE_KEY,REQUIREMENT_GATHER_SCORE))
+# remove outlier student #45 as they do not have any class data
+combined = subset(combined, STUDENT_KEY!=45)
+
+combined = combined %>% arrange(SESSION_NUMBER)
+
+features_by_session = combined %>% group_by(SESSION_NUMBER) %>% 
+  summarise(session_attendance = mean(ATTENDED),
+            session_q_clicker_accuracy = ifelse(sum(COMPLETED_Q_CLICKER)>0,sum(CORRECT_Q_CLICKER)/sum(COMPLETED_Q_CLICKER),NA),
+            session_clicker_completion = sum(TOTAL_COMPLETED_CLICKER)/sum(TOTAL_POSSIBLE_CLICKER),
+            session_temperature = ifelse(sum(COMPLETED_T_CLICKER>0)>0,sum(AVG_T_CLICKER)/sum(COMPLETED_T_CLICKER>0),NA)
+  )
+
+features_by_student = combined %>% group_by(STUDENT_KEY) %>% 
+  summarise(student_attendance = sum(ATTENDED)/length(ATTENDED),
+            student_q_clicker_accuracy = ifelse(sum(COMPLETED_Q_CLICKER)>0,sum(CORRECT_Q_CLICKER)/sum(COMPLETED_Q_CLICKER),NA),
+            student_clicker_completion = sum(TOTAL_COMPLETED_CLICKER)/sum(TOTAL_POSSIBLE_CLICKER),
+            student_temperature = sum(AVG_T_CLICKER)/sum(COMPLETED_T_CLICKER>0),
+            DATABASE_SCORE = mean(DATABASE_SCORE),
+            SQL_SCORE = mean(SQL_SCORE),
+            PROGRAMING_SCORE = mean(PROGRAMING_SCORE),
+            STORED_PROC_SCORE = mean(STORED_PROC_SCORE),
+            ETL_SCORE = mean(ETL_SCORE),
+            DATA_VIS_SCORE = mean(DATA_VIS_SCORE),
+            SKILL_SURVEY_SCORE = mean(SKILL_SURVEY_SCORE)
+  )
+
+student_quiz_score = combined %>% group_by(STUDENT_KEY) %>% filter(!duplicated(QUIZ_NUMBER)) %>% summarise(student_quiz_score=mean(na.omit(QUIZ_SCORE)))
+
+features_by_student['student_quiz_score'] <- student_quiz_score$student_quiz_score
+
+bottom10students = select(features_by_student, "STUDENT_KEY", "student_quiz_score", "student_attendance","student_temperature") %>% arrange(student_quiz_score)
+
+bottom10students = bottom10students %>% rename("Student"=STUDENT_KEY,
+                            "Average Quiz Score"=student_quiz_score,
+                            "Average Attendance"=student_attendance,
+                            "Average Feeling"=student_temperature)
+
+###### STUDENT DASHBOARD PRE-PROCESSING ######
+# Dataframe of 1 row for each student
+student_average_quiz <- quiz %>%
+  group_by(STUDENT_KEY) %>% mutate_all(~replace(., is.na(.), 0)) %>%
+  summarize(
+    quiz_score = (mean(QUIZ_SCORE)/20)*100, 
+    average_clicker_score = (sum(CORRECT_Q_CLICKER)/sum(COMPLETED_Q_CLICKER))*100, 
+    student_attendance = (sum(ATTENDED)/length(SESSION_NUMBER))*100, 
+    clicker_participation = (sum(TOTAL_COMPLETED_CLICKER)/sum(TOTAL_POSSIBLE_CLICKER))*100, 
+  )
+
+student_quiz <- quiz %>%
+  group_by(STUDENT_KEY, QUIZ_NUMBER) %>%
+  mutate(QUIZ_SCORE = replace_na(QUIZ_SCORE, 0)) %>%
+  summarize(
+    quiz.score = (QUIZ_SCORE[1]/20)*100 
+  ) %>% na.omit()
+
+student_temperature <- quiz %>%
+  filter(COMPLETED_T_CLICKER > 0) %>%
+  group_by(STUDENT_KEY) %>%
+  summarize(course_feelings = (mean(AVG_T_CLICKER)/5)*100)
+
+# Dataframe of average temperature for each session, using only students who completed at least one temperature question
+Session.Temperature <- quiz %>%
+  filter(COMPLETED_T_CLICKER > 0) %>%
+  group_by(SESSION_NUMBER) %>%
+  summarize(avg.temperature = mean(AVG_T_CLICKER))
+
+# Dataframe of average clicker correctness for each session, using only students who completed at least one clicker question
+Session.Performance <- quiz %>%
+  filter(COMPLETED_Q_CLICKER > 0) %>%
+  group_by(SESSION_NUMBER) %>%
+  summarize(avg.correct = mean(CORRECT_Q_CLICKER),
+            clicker.quiz.cor = cor(CORRECT_Q_CLICKER/COMPLETED_Q_CLICKER, QUIZ_SCORE, 
+                                   use = 'pairwise.complete.obs'))
+
+# Dataframe with average scores for each self-reported skill
+subject_columns <- c("DATABASE_SCORE", "SQL_SCORE", "PROGRAMING_SCORE", "STORED_PROC_SCORE",
+                  "ETL_SCORE", "DATA_VIS_SCORE")
+student_experience <- data.frame(subject = subject_columns, average_experience = sapply(experience[, subject_columns], 
+                                                 function(x) mean(x, na.rm = TRUE)))
+
+#temperature per session
+sess_temp <- quiz %>%
+  group_by(SESSION_NUMBER) %>% summarize(avg_temp_per_sess = mean(AVG_T_CLICKER))
+
+```
+
+# Preparing Visualizations (contents for dashboard)
+
+```{r}
+server = function(input, output) {
+    
+#### INSTRUCTOR DASHBOARD ####
+#general tab visualizations
+#latest session summary stats
+latest_quiz_data = teacher_quiz %>% filter(ACAD_DATE_KEY == max(teacher_quiz$ACAD_DATE_KEY))
+  latest_attendance = features_by_session$session_attendance[nrow(features_by_session)]
+  latest_feeling = features_by_session$session_temperature[nrow(features_by_session)]
+  
+  output$latest_quiz.info = renderInfoBox({
+    infoBox("Latest Session's Quiz Score",
+            paste(round(((mean(latest_quiz_data$QUIZ_SCORE)) / 20 * 100), 2), "%"),
+            icon = icon("edit"), color = "orange")
+  })
+  
+  output$latest_attendance.info = renderInfoBox({
+      infoBox("Latest Session's Attendance Rate", 
+              paste(round((latest_attendance)*100, 2), "%"),
+              icon = icon("clipboard-check"), color = "purple")
+  })
+  
+  output$latest_feeling.info = renderInfoBox({
+    infoBox("Latest Session's Average Feeling",
+            paste(round((latest_feeling/5)*100, 2), "%"),
+            icon = icon("heart"), color = "red")
+  })
+
+
+
+  #class quiz score for 2017
+  output$quiz.session.hist = renderPlot({
+    hist(features_by_student$student_quiz_score, main = "", xlab = "Average Quiz Score across All Sessions", ylab = "Frequency")
+  })
+
+#class attendance
+ output$attendance.session.plot = renderPlot({
+    ggplot(data = features_by_session, aes(x = SESSION_NUMBER, y = session_attendance)) +
+      geom_line() +
+labs(x= "Session Number", y = "Class attendance") + 
+     scale_x_continuous(breaks=seq(2, 25, 1))
+
+  })
+
+#class feeling over time
+    output$feeling.session.plot = renderPlot({
+        ggplot(data = features_by_session, aes(x = SESSION_NUMBER, y = session_temperature)) +
+          labs(x = "Session number", y = "Average temperature score") +
+          geom_line() + 
+     	scale_x_continuous(breaks=seq(2, 25, 1))
+
+      })
+    
+#student tab visualizations
+  output$student.info.plot = renderPlot({
+    ggplot(data=combined[combined$STUDENT_KEY==input$student,], aes( x=QUIZ_NUMBER, y=QUIZ_SCORE)) + 
+      geom_line() +
+      scale_x_continuous(breaks=seq(1, 10, 1)) +
+      labs(x = "Quiz number", y = "Quiz score")
+    })
+  output$bottom.10.table = renderTable(bottom10students[1:10,])
+
+
+#course recommendations visualizations
+
+#average quiz score 
+    quiz_quiznumber = combined %>%
+      group_by(QUIZ_NUMBER) %>%
+      summarise(class_avg_quiz = mean(QUIZ_SCORE))
+
+    output$quiz.quiznumber.plot = renderPlot({
+      ggplot(quiz_quiznumber, aes(x = QUIZ_NUMBER, y = class_avg_quiz )) +
+        geom_line() + 
+        scale_x_continuous(breaks=seq(1, 25, 1)) +
+        labs(x = "Quiz Number", y = "Class Average Quiz Score") 
+      
+    })
+
+    
+  
+#### STUDENT DASHBOARD ####
+    output$stud.info1 = renderInfoBox({
+        infoBox("Attendance", 
+                paste0(round(100 * mean(quiz[quiz$STUDENT_KEY == input$student_view, 
+                                             'ATTENDED'])), "%"), 
+                icon = icon("list"), color = "purple")
+    })
+    
+    output$stud.info2 = renderInfoBox({
+        infoBox("Average Quiz Score", 
+                paste0(round(student_quiz %>%
+                               filter(STUDENT_KEY == input$student_view) %>%
+                               summarize(mean(quiz.score)) %>%
+                               pull()), '%'),
+                icon = icon("percent"), color = "yellow")
+    })
+    
+    output$stud.info3 = renderInfoBox({
+        infoBox("iClicker Participation", 
+                paste0(round(student_average_quiz %>% filter(STUDENT_KEY == input$student_view) %>%
+                      summarize(clicker_participation) %>%
+                               pull()), '%'),
+                icon = icon("mouse"), color = "green")
+    })
+    
+    output$stud.info4 = renderInfoBox({
+    infoBox("Course Experience", 
+            paste0(round(student_temperature %>% filter(STUDENT_KEY == input$student_view) %>% 
+                  summarize(course_feelings) %>%
+                  pull()),'% positive'),
+            icon = icon("smile"), color = "blue")
+    })
+    
+    
+    output$stud.plot1 = renderPlot({
+        ggplot(student_quiz, aes(x = as.factor(QUIZ_NUMBER), y = quiz.score)) +
+          geom_boxplot(outlier.shape = NA) +
+          geom_point(data = student_quiz[student_quiz$STUDENT_KEY == input$student_view,], 
+                     aes(x = as.factor(QUIZ_NUMBER), y = quiz.score, color = 'red', size = 20)) +
+          geom_line(data = student_quiz[student_quiz$STUDENT_KEY == input$student_view,], aes(x = QUIZ_NUMBER, y = quiz.score, color='red')) + 
+          theme_classic() +
+          theme(legend.position = 'none') +
+          labs(x = 'Quiz Number', y = 'Quiz Score (%)')
+    })
+    
+    output$stud.plot2 = renderPlot({
+        ggplot(melt(experience[, c('STUDENT_KEY', subject_columns)], id.vars = 'STUDENT_KEY'), 
+               aes(x = variable, y = value)) + 
+          geom_point(data = melt(experience[experience$STUDENT_KEY == input$student_view,
+                                            subject_columns]), aes(x = variable, y = value, 
+                                                                color = 'red', labels="Your Experience")) +
+          geom_point(data = student_experience, aes(x = subject, y = average_experience, color='blue', labels='Class Experience')) +
+          scale_color_manual(name="Color Key", labels = c("Average Class Experience", "Your  Experience"), values = c("blue", "red"))+
+          theme_classic() +
+          guides(fill=guide_legend(title="Legend")) +
+          theme(legend.position = 'bottom') + 
+          labs(x = 'Subject', y = 'Reported Experience') +
+          scale_x_discrete(labels = c('Database', 'SQL', 'Programming', 'Stored Procedure',
+                                      'ETL', 'Data Visualization'))
+    })
+    
+    output$stud.plot3 = renderPlot({
+        ggplot(quiz, aes(x = as.factor(SESSION_NUMBER), y = CORRECT_Q_CLICKER)) +
+          geom_point(data = quiz[quiz$STUDENT_KEY == input$student_view,], 
+                     aes(x = SESSION_NUMBER, y = CORRECT_Q_CLICKER, color = 'red', size = 20)) +
+        geom_line(data = quiz[quiz$STUDENT_KEY == input$student_view,], aes(x = SESSION_NUMBER, y = CORRECT_Q_CLICKER, color='red')) +
+        theme_classic() + 
+        theme(legend.position = 'none') +
+        labs(x = 'Session Number', y = 'Number of correct iClicker questions')
+        
+    })
+    
+    output$stud.plot4 = renderPlot({
+        ggplot(quiz, aes(x = as.factor(SESSION_NUMBER), y = AVG_T_CLICKER)) +
+        geom_point(data = quiz[quiz$STUDENT_KEY == input$student_view,], 
+                     aes(x = as.factor(SESSION_NUMBER), y = AVG_T_CLICKER, color = 'red', labels = "student average")) +
+        geom_point(data = sess_temp, 
+                     aes(x = as.factor(SESSION_NUMBER), y = avg_temp_per_sess, color = 'blue', labels = "class average"))+
+        scale_color_manual(name="Color Key", labels = c("class average t-score", "student average t-score"), values = c("blue", "red"))+
+        theme_classic() +
+        theme(legend.position = 'bottom') + 
+        guides(fill=guide_legend(title="Legend")) +
+        labs(x = 'Session Number', y = 'Average T-Score')
+    })
+}
+```
+
+# Producing Dashboard
+
+```{r eval=FALSE}
+# set up the header of the dashboard
+dhead = dashboardHeader(title = "CS 1001: Business Intelligence", titleWidth = '300px')
+
+# set up the sidebar which has links to two pages
+dside = dashboardSidebar(sidebarMenu(
+    menuItem("Student Dashboard", tabName = "student", icon = icon("dashboard")),
+    selectInput("student", "Student ID:", choices = sort(unique(quiz$STUDENT_KEY)))
+))
+
+# set up the sidebar which has links to 3 pages
+dside = dashboardSidebar(
+  sidebarMenu(
+    id = "sidebarmenu",
+    menuItem("Instructor Dashboard", 
+             icon = icon("chalkboard-teacher"),
+             menuSubItem("General Information", tabName = "general", icon = icon("info-circle")),
+             menuSubItem("Student Information", tabName= "student", icon = icon("user-graduate")),
+             menuSubItem("Course Recommendations", tabName= "course", icon = icon("lightbulb"))
+      ),
+    menuItem("Student Dashboard", tabName = "student_view", icon = icon("user-graduate")),
+    selectInput("student_view", "Student ID:", choices = sort(unique(quiz$STUDENT_KEY)))
+  ))
+
+# set up the body of the dashboard
+dbody = dashboardBody(
+    tabItems(
+      general_dash,
+      student_dash,
+      course_dash, 
+      student_view)
+)
+
+# combining header, sidebar, and body
+ui = dashboardPage(dhead, dside, dbody)
+
+# generating a local instance of dashboard
+shinyApp(ui, server)
+```
+
